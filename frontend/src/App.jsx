@@ -39,7 +39,7 @@ function App() {
         ? { url: input, maxDepth: settings.maxDepth, maxLinksPerPage: settings.maxLinksPerPage, summarize: true }
         : { query: input, maxDepth: settings.maxDepth, maxLinksPerPage: settings.maxLinksPerPage, summarize: true };
 
-      const response = await fetch('http://localhost:4000/api/scrape', {
+      const response = await fetch('https://web-scrapper-jz7g.onrender.com/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
