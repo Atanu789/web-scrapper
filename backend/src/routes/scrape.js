@@ -498,7 +498,7 @@ router.post('/', async (req, res) => {
     let targetUrl = url;
 
     if (!url && query) {
-      const tavilyKey = process.env.TAVILY_API_KEY;
+      const tavilyKey = "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";
       const tavilyResp = await axios.post(
         'https://api.tavily.com/search',
         { query, max_results: 5 },

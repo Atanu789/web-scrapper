@@ -48,10 +48,9 @@ function App() {
       const data = await response.json();
 
       if (response.ok) {
-        // Store the raw depth-wise results
+
         setDepthWiseResults(data.depthWiseResults || {});
 
-        // Process the API response structure
         let processedResult = '';
         let processedSources = [];
 
