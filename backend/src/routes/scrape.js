@@ -1,26 +1,24 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { Router } from 'express';
+import PDFDocument from 'pdfkit';
 import { URL } from 'url';
 
 const router = Router();
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
+// Essential user agents for bot detection avoidance
 const userAgents = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0'
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
 ];
 
+// Essential HTTP client with basic headers and retry logic
 const createAxiosInstance = (customHeaders = {}) => {
   const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
 
   return axios.create({
-    timeout: 20000,
+    timeout: 30000, // Increased timeout
     maxRedirects: 5,
     headers: {
       'User-Agent': randomUserAgent,
@@ -30,182 +28,40 @@ const createAxiosInstance = (customHeaders = {}) => {
       'DNT': '1',
       'Connection': 'keep-alive',
       'Upgrade-Insecure-Requests': '1',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache',
       ...customHeaders
     },
-    validateStatus: function (status) {
-      return status >= 200 && status < 400;
-    }
+    validateStatus: (status) => status >= 200 && status < 400
   });
 };
 
-// Link discovery and classification
-class LinkDiscovery {
-  constructor(baseUrl) {
-    this.baseUrl = baseUrl;
-    this.baseDomain = new URL(baseUrl).hostname;
-  }
-
-  extractLinks(html) {
-    const $ = cheerio.load(html);
-    const links = [];
-
-    const linkSelectors = [
-      'a[href*="article"]',
-      'a[href*="post"]',
-      'a[href*="blog"]',
-      'a[href*="news"]',
-      'a[href*="story"]',
-      'a[href*="content"]',
-      'a[href*="page"]',
-      'main a',
-      'article a',
-      '.content a',
-      '#content a',
-      '.post a',
-      '.entry a',
-      'a'
-    ];
-
-    const processedUrls = new Set();
-
-    linkSelectors.forEach(selector => {
-      $(selector).each((i, element) => {
-        const href = $(element).attr('href');
-        if (!href) return;
-
-        try {
-          const absoluteUrl = new URL(href, this.baseUrl).href;
-          const urlObj = new URL(absoluteUrl);
-
-          if (processedUrls.has(absoluteUrl)) return;
-          processedUrls.add(absoluteUrl);
-
-          if (this.isValidLink(absoluteUrl, urlObj)) {
-            const linkText = $(element).text().trim();
-            const context = this.extractContext($(element));
-
-            links.push({
-              url: absoluteUrl,
-              text: linkText,
-              context: context,
-              priority: this.calculatePriority(absoluteUrl, linkText, context),
-              selector: selector
-            });
-          }
-        } catch (error) {
-          // Skip invalid URLs
-        }
-      });
-    });
-
-    return links
-      .sort((a, b) => b.priority - a.priority)
-      .slice(0, 10);
-  }
-
-  isValidLink(url, urlObj) {
-    const hostname = urlObj.hostname;
-    const pathname = urlObj.pathname;
-
-    if (hostname !== this.baseDomain && !hostname.includes(this.baseDomain.replace('www.', ''))) {
-      return false;
-    }
-
-    const unwantedExtensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.zip', '.rar', '.exe', '.dmg', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.mp3', '.mp4', '.avi', '.mov'];
-    if (unwantedExtensions.some(ext => pathname.toLowerCase().endsWith(ext))) {
-      return false;
-    }
-
-    const unwantedPaths = ['/login', '/register', '/cart', '/checkout', '/account', '/admin', '/wp-admin', '/search', '/tag/', '/category/', '/author/'];
-    if (unwantedPaths.some(path => pathname.toLowerCase().includes(path))) {
-      return false;
-    }
-
-    if (url.includes('#') && !url.includes('?')) {
-      return false;
-    }
-
-    return true;
-  }
-
-  extractContext(element) {
-    const parent = element.parent();
-    const context = parent.text().trim();
-    return context.length > 200 ? context.substring(0, 200) + '...' : context;
-  }
-
-  calculatePriority(url, linkText, context) {
-    let priority = 0;
-
-    const urlLower = url.toLowerCase();
-    if (urlLower.includes('article')) priority += 20;
-    if (urlLower.includes('post')) priority += 15;
-    if (urlLower.includes('blog')) priority += 15;
-    if (urlLower.includes('news')) priority += 18;
-    if (urlLower.includes('story')) priority += 16;
-    if (urlLower.includes('content')) priority += 10;
-
-    const textLower = linkText.toLowerCase();
-    if (textLower.includes('read more')) priority += 25;
-    if (textLower.includes('continue reading')) priority += 25;
-    if (textLower.includes('full article')) priority += 30;
-    if (textLower.includes('details')) priority += 15;
-    if (textLower.length > 10 && textLower.length < 100) priority += 10;
-
-    if (context.includes('article') || context.includes('post')) priority += 10;
-
-    if (linkText.length < 5) priority -= 10;
-    if (linkText.length > 150) priority -= 5;
-
-    if (/^\d+$/.test(linkText.trim())) priority -= 20;
-
-    return priority;
-  }
-}
-
-// Enhanced content extraction with multiple strategies
+// Enhanced content extraction class
 class ContentExtractor {
   constructor(html, url) {
     this.$ = cheerio.load(html);
     this.url = url;
-    this.content = '';
-  }
-
-  extractContent() {
-    const strategies = [
-      this.extractJSONLD.bind(this),
-      this.extractOpenGraph.bind(this),
-      this.extractBySemanticTags.bind(this),
-      this.extractBySelectors.bind(this),
-      this.extractByReadability.bind(this),
-      this.extractFallback.bind(this)
+    this.contentSelectors = [
+      'main article',
+      'article',
+      '.post-content',
+      '.entry-content',
+      '.article-content',
+      '.article-body',
+      'main',
+      '.content-body',
+      '.main-content',
+      '#content',
+      '.content',
+      '[role="main"]'
     ];
-
-    for (const strategy of strategies) {
-      try {
-        const result = strategy();
-        if (result && result.length > 100) {
-          return this.cleanContent(result);
-        }
-      } catch (error) {
-        console.log(`Extraction strategy failed: ${error.message}`);
-      }
-    }
-
-    return '';
   }
 
-  // Extract title separately
+  // Extract title using common selectors
   extractTitle() {
     const titleSelectors = [
       'h1',
       'title',
       'meta[property="og:title"]',
+      'meta[name="twitter:title"]',
       '.post-title',
       '.entry-title',
       '.article-title',
@@ -215,254 +71,254 @@ class ContentExtractor {
     for (const selector of titleSelectors) {
       const element = this.$(selector);
       if (element.length > 0) {
-        const title = element.first().text().trim() || element.first().attr('content');
-        if (title && title.length > 0) {
-          return title;
+        const title = selector.startsWith('meta')
+          ? element.attr('content')
+          : element.first().text().trim();
+
+        if (title && title.length > 0 && title.length < 300) {
+          return this.cleanText(title);
         }
       }
     }
     return 'No title found';
   }
 
-  extractJSONLD() {
-    const jsonLdScripts = this.$('script[type="application/ld+json"]');
+  // Enhanced content extraction with better fallbacks
+  extractContent() {
+    // Create a working copy of the DOM
+    const $body = this.$('body').clone();
 
-    for (let i = 0; i < jsonLdScripts.length; i++) {
-      try {
-        const jsonData = JSON.parse(this.$(jsonLdScripts[i]).html());
-        if (jsonData.articleBody) {
-          return jsonData.articleBody;
-        }
-        if (jsonData.description) {
-          return jsonData.description;
-        }
-      } catch (error) {
-        continue;
-      }
-    }
-    return '';
-  }
+    // Remove unwanted elements
+    $body.find(`
+      script, style, nav, footer, header, aside, 
+      .advertisement, .ad, .ads, .sidebar, .menu, 
+      .social, .share, .comment, .comments, 
+      .related, .recommended, .popup, .modal,
+      [class*="ad"], [id*="ad"], [class*="sidebar"],
+      [class*="menu"], [class*="nav"]
+    `).remove();
 
-  extractOpenGraph() {
-    const description = this.$('meta[property="og:description"]').attr('content');
-    if (description && description.length > 100) {
-      return description;
-    }
-    return '';
-  }
-
-  extractBySemanticTags() {
-    this.$('script, style, nav, footer, header, aside, .advertisement, .ad, .sidebar, .menu, .navigation, .breadcrumb, .social-share, .related-posts, .comments').remove();
-
-    const semanticSelectors = [
-      'main article',
-      'main',
-      'article',
-      '[role="main"]',
-      '.main-content',
-      '#main-content',
-      '.content-area',
-      '#content-area'
-    ];
-
-    for (const selector of semanticSelectors) {
-      const element = this.$(selector);
+    // Try content selectors first
+    for (const selector of this.contentSelectors) {
+      const element = $body.find(selector);
       if (element.length > 0) {
-        const text = element.text().replace(/\s+/g, ' ').trim();
-        if (text.length > 200) {
-          return text;
+        const text = element.text().trim();
+        if (text.length > 200) { // Minimum content threshold
+          return this.cleanContent(text);
         }
       }
     }
-    return '';
+
+    // Fallback: extract from paragraphs
+    const paragraphs = $body.find('p');
+    if (paragraphs.length > 0) {
+      let combinedText = '';
+      paragraphs.each((i, elem) => {
+        const pText = this.$(elem).text().trim();
+        if (pText.length > 50) {
+          combinedText += pText + '\n\n';
+        }
+      });
+      if (combinedText.length > 200) {
+        return this.cleanContent(combinedText);
+      }
+    }
+
+    // Last resort: body text
+    const bodyText = $body.text().trim();
+    return bodyText.length > 200 ? this.cleanContent(bodyText) : 'No content found';
   }
 
-  extractBySelectors() {
-    const contentSelectors = [
-      '.post-content',
-      '.entry-content',
-      '.article-content',
-      '.content-body',
-      '.post-body',
-      '.article-body',
-      '.text-content',
-      '.main-text',
-      '#post-content',
-      '#article-content',
-      '.content',
-      '#content'
-    ];
+  // Extract structured HTML content for PDF generation
+  extractContentHtml() {
+    const $body = this.$('body').clone();
 
-    for (const selector of contentSelectors) {
-      const element = this.$(selector);
+    // Remove unwanted elements
+    $body.find(`
+      script, style, nav, footer, header, aside,
+      .advertisement, .ad, .ads, .sidebar, .menu,
+      .social, .share, .comment, .comments,
+      .related, .recommended, .popup, .modal,
+      [class*="ad"], [id*="ad"]
+    `).remove();
+
+    // Try to find main content container
+    for (const selector of this.contentSelectors) {
+      const element = $body.find(selector);
       if (element.length > 0) {
-        const text = element.text().replace(/\s+/g, ' ').trim();
-        if (text.length > 200) {
-          return text;
+        const html = element.html();
+        const textLength = element.text().trim().length;
+        if (html && textLength > 200) {
+          return this.cleanHtml(html);
         }
       }
     }
-    return '';
-  }
 
-  extractByReadability() {
-    const $ = this.$;
-    let bestCandidate = null;
-    let bestScore = 0;
-
-    $('p').each((i, element) => {
-      const $element = $(element);
-      const text = $element.text().trim();
-
-      if (text.length < 50) return;
-
-      let score = text.length;
-
-      if (text.length > 100 && text.length < 1000) {
-        score += 50;
-      }
-
-      if ($element.closest('article, .post, .entry, .content, main').length > 0) {
-        score += 30;
-      }
-
-      const linkCount = $element.find('a').length;
-      if (linkCount > 3) {
-        score -= linkCount * 10;
-      }
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestCandidate = $element.parent();
-      }
-    });
-
-    if (bestCandidate) {
-      return bestCandidate.text().replace(/\s+/g, ' ').trim();
+    // Fallback: collect paragraphs and headings
+    const contentElements = $body.find('h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote');
+    if (contentElements.length > 0) {
+      let html = '';
+      contentElements.each((i, elem) => {
+        const elementHtml = this.$(elem).toString();
+        const elementText = this.$(elem).text().trim();
+        if (elementText.length > 10) {
+          html += elementHtml + '\n';
+        }
+      });
+      return html ? this.cleanHtml(html) : null;
     }
-    return '';
+
+    return null;
   }
 
-  extractFallback() {
-    this.$('script, style, nav, footer, header, aside, .advertisement, .ad, .sidebar').remove();
-    const bodyText = this.$('body').text().replace(/\s+/g, ' ').trim();
-    return bodyText.length > 100 ? bodyText : '';
+  // Extract comprehensive metadata
+  extractMetadata() {
+    const metadata = {};
+
+    // Description
+    metadata.description =
+      this.$('meta[name="description"]').attr('content') ||
+      this.$('meta[property="og:description"]').attr('content') ||
+      this.$('meta[name="twitter:description"]').attr('content') || '';
+
+    // Keywords
+    metadata.keywords = this.$('meta[name="keywords"]').attr('content') || '';
+
+    // Author
+    metadata.author =
+      this.$('meta[name="author"]').attr('content') ||
+      this.$('meta[property="article:author"]').attr('content') ||
+      this.$('.author').first().text().trim() ||
+      this.$('[rel="author"]').first().text().trim() || '';
+
+    // Publication date
+    metadata.publishDate =
+      this.$('meta[property="article:published_time"]').attr('content') ||
+      this.$('meta[name="date"]').attr('content') ||
+      this.$('time[datetime]').first().attr('datetime') ||
+      this.$('time').first().text().trim() || '';
+
+    // Language
+    metadata.language =
+      this.$('html').attr('lang') ||
+      this.$('meta[http-equiv="content-language"]').attr('content') || 'en';
+
+    // Site name
+    metadata.siteName =
+      this.$('meta[property="og:site_name"]').attr('content') || '';
+
+    // Image
+    metadata.image =
+      this.$('meta[property="og:image"]').attr('content') ||
+      this.$('meta[name="twitter:image"]').attr('content') || '';
+
+    return metadata;
   }
 
+  // Clean text content
+  cleanText(text) {
+    return text
+      .replace(/\s+/g, ' ')
+      .replace(/[\r\n]+/g, ' ')
+      .trim();
+  }
+
+  // Clean extracted content
   cleanContent(content) {
     return content
-      .replace(/\s+/g, ' ')
-      .replace(/\n+/g, '\n')
-      .replace(/\t+/g, ' ')
+      .replace(/\s+/g, ' ')           // Multiple spaces to single
+      .replace(/\n\s*\n/g, '\n\n')    // Multiple newlines to double
+      .replace(/\t/g, ' ')            // Tabs to spaces
       .trim()
-      .slice(0, 50000);
+      .substring(0, 50000);           // Reasonable content length limit
+  }
+
+  // Clean HTML content
+  cleanHtml(html) {
+    return html
+      .replace(/\s+/g, ' ')
+      .replace(/>\s+</g, '><')
+      .trim();
   }
 }
 
-// Advanced scraping with nested link support
-class AdvancedScraper {
-  constructor(maxDepth = 2, maxLinksPerPage = 5) {
-    this.maxDepth = maxDepth;
-    this.maxLinksPerPage = maxLinksPerPage;
-    this.scrapedUrls = new Set();
-    this.results = [];
+// Enhanced scraper with better error handling
+class WebScraper {
+  constructor() {
+    this.maxRetries = 3;
+    this.retryDelay = 2000;
   }
 
-  async scrapeWithNestedLinks(startUrl, query = '', depth = 0) {
-    if (depth > this.maxDepth || this.scrapedUrls.has(startUrl)) {
-      return this.results;
-    }
+  async scrapeUrl(url) {
+    let lastError = null;
 
-    console.log(`Scraping depth ${depth}: ${startUrl}`);
-    this.scrapedUrls.add(startUrl);
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try {
+        console.log(`Scraping attempt ${attempt}/${this.maxRetries}: ${url}`);
 
-    try {
-      const html = await this.scrapeWithFallback(startUrl);
-      const extractor = new ContentExtractor(html, startUrl);
-      const content = extractor.extractContent();
-      const title = extractor.extractTitle();
+        const html = await this.fetchWithRetry(url, attempt);
+        const extractor = new ContentExtractor(html, url);
 
-      if (content) {
-        this.results.push({
-          url: startUrl,
-          title: title,
-          content: content,
-          depth: depth,
-          contentLength: content.length,
-          timestamp: new Date().toISOString()
-        });
-      }
+        const result = {
+          url: url,
+          title: extractor.extractTitle(),
+          content: extractor.extractContent(),
+          contentHtml: extractor.extractContentHtml(),
+          metadata: extractor.extractMetadata(),
+          timestamp: new Date().toISOString(),
+          success: true,
+          wordCount: this.countWords(extractor.extractContent()),
+          scrapingAttempts: attempt
+        };
 
-      if (depth < this.maxDepth) {
-        const linkDiscovery = new LinkDiscovery(startUrl);
-        const links = linkDiscovery.extractLinks(html);
+        // Validate extracted content
+        if (!result.content || result.content === 'No content found' || result.content.length < 100) {
+          throw new Error('Insufficient content extracted - content too short or empty');
+        }
 
-        const relevantLinks = query
-          ? this.filterLinksByQuery(links, query)
-          : links.slice(0, this.maxLinksPerPage);
+        console.log(`✅ Successfully scraped: ${url} (${result.wordCount} words)`);
+        return result;
 
-        for (const link of relevantLinks) {
-          await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
-          await this.scrapeWithNestedLinks(link.url, query, depth + 1);
+      } catch (error) {
+        lastError = error;
+        console.log(`❌ Attempt ${attempt} failed for ${url}: ${error.message}`);
+
+        if (attempt < this.maxRetries) {
+          const delay = this.retryDelay * attempt;
+          console.log(`⏳ Waiting ${delay}ms before retry...`);
+          await this.delay(delay);
         }
       }
-
-    } catch (error) {
-      console.error(`Failed to scrape ${startUrl}:`, error.message);
     }
 
-    return this.results;
+    return {
+      url: url,
+      error: lastError?.message || 'Unknown error',
+      success: false,
+      timestamp: new Date().toISOString(),
+      scrapingAttempts: this.maxRetries
+    };
   }
 
-  filterLinksByQuery(links, query) {
-    const queryTerms = query.toLowerCase().split(' ');
-
-    return links
-      .map(link => {
-        let relevanceScore = link.priority;
-
-        queryTerms.forEach(term => {
-          if (link.text.toLowerCase().includes(term)) {
-            relevanceScore += 30;
-          }
-          if (link.context.toLowerCase().includes(term)) {
-            relevanceScore += 20;
-          }
-          if (link.url.toLowerCase().includes(term)) {
-            relevanceScore += 15;
-          }
-        });
-
-        return { ...link, relevanceScore };
-      })
-      .sort((a, b) => b.relevanceScore - a.relevanceScore)
-      .slice(0, this.maxLinksPerPage);
-  }
-
-  async scrapeWithFallback(url) {
+  // Enhanced fetch with multiple strategies
+  async fetchWithRetry(url, attempt) {
     const strategies = [
+      // Strategy 1: Standard request
       async () => {
         const axiosInstance = createAxiosInstance();
         const response = await axiosInstance.get(url);
         return response.data;
       },
+      // Strategy 2: With referer
       async () => {
-        const axiosInstance = createAxiosInstance({ 'Referer': 'https://www.google.com/' });
-        const response = await axiosInstance.get(url);
-        return response.data;
-      },
-      async () => {
-        await new Promise(resolve => setTimeout(resolve, 2000));
         const axiosInstance = createAxiosInstance({
-          'Referer': 'https://duckduckgo.com/',
-          'Accept-Language': 'en-GB,en;q=0.9',
-          'Sec-CH-UA': '"Google Chrome";v="120", "Chromium";v="120", "Not?A_Brand";v="99"',
-          'Sec-CH-UA-Mobile': '?0',
-          'Sec-CH-UA-Platform': '"Windows"'
+          'Referer': 'https://www.google.com/',
+          'Cache-Control': 'no-cache'
         });
         const response = await axiosInstance.get(url);
         return response.data;
       },
+      // Strategy 3: Mobile user agent
       async () => {
         const axiosInstance = createAxiosInstance({
           'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
@@ -472,125 +328,386 @@ class AdvancedScraper {
       }
     ];
 
-    for (let i = 0; i < strategies.length; i++) {
-      try {
-        console.log(`Trying strategy ${i + 1} for ${url}`);
-        return await strategies[i]();
-      } catch (error) {
-        console.log(`Strategy ${i + 1} failed:`, error.message);
-        if (i === strategies.length - 1) throw error;
+    const strategyIndex = Math.min(attempt - 1, strategies.length - 1);
+    return await strategies[strategyIndex]();
+  }
+
+  // Count words in content
+  countWords(content) {
+    if (!content) return 0;
+    return content.trim().split(/\s+/).filter(word => word.length > 0).length;
+  }
+
+  // Utility delay function
+  delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Scrape multiple URLs with proper concurrency control
+  async scrapeMultipleUrls(urls, concurrent = 2) {
+    const results = [];
+    const batches = [];
+
+    // Create batches
+    for (let i = 0; i < urls.length; i += concurrent) {
+      batches.push(urls.slice(i, i + concurrent));
+    }
+
+    console.log(`🚀 Starting batch scraping: ${urls.length} URLs in ${batches.length} batches`);
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      console.log(`📦 Processing batch ${batchIndex + 1}/${batches.length}: ${batch.length} URLs`);
+
+      const batchPromises = batch.map(url => this.scrapeUrl(url));
+      const batchResults = await Promise.allSettled(batchPromises);
+
+      batchResults.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          const scrapedData = result.value;
+          // Remove HTML content for batch operations to save memory
+          if (scrapedData.success) {
+            delete scrapedData.contentHtml;
+          }
+          results.push(scrapedData);
+        } else {
+          results.push({
+            url: batch[index],
+            error: result.reason?.message || 'Unknown error',
+            success: false,
+            timestamp: new Date().toISOString()
+          });
+        }
+      });
+
+      // Add delay between batches to be respectful
+      if (batchIndex < batches.length - 1) {
+        console.log(`⏳ Waiting 3s before next batch...`);
+        await this.delay(3000);
       }
     }
+
+    return results;
   }
 }
 
-// Main router endpoint
-router.post('/', async (req, res) => {
-  const { query, url, maxDepth = 2, maxLinksPerPage = 3, summarize = false } = req.body;
+// ===================================================================
+// START OF CORRECTED CODE
+// ===================================================================
 
-  if (!query && !url) {
-    return res.status(400).json({ error: 'Provide url or query' });
+// Enhanced PDF generation (Corrected)
+function generatePDF(doc, title, content, metadata) {
+  // --- This part is the same as before ---
+  doc.font('Helvetica-Bold')
+    .fontSize(24)
+    .text(title, { align: 'center' });
+
+  doc.moveDown(1);
+
+  if (metadata.author) {
+    doc.font('Helvetica')
+      .fontSize(12)
+      .text(`Author: ${metadata.author}`, { align: 'center' });
+  }
+
+  if (metadata.publishDate) {
+    doc.fontSize(12)
+      .text(`Published: ${new Date(metadata.publishDate).toLocaleDateString()}`, { align: 'center' });
+  }
+
+  doc.moveDown(2);
+
+  doc.font('Helvetica')
+    .fontSize(11)
+    .text(content, {
+      width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
+      align: 'left',
+      lineGap: 3
+    });
+
+  // --- THIS IS THE CORRECTED PART ---
+  // Add footer with the correct page range logic
+  const range = doc.bufferedPageRange();
+  const pageCount = range.count;
+
+  for (let i = range.start; i < range.start + pageCount; i++) {
+    doc.switchToPage(i);
+
+    const pageNumber = i + 1;
+
+    doc.fontSize(8)
+      .text(`Generated on ${new Date().toLocaleDateString()} • Page ${pageNumber} of ${pageCount}`,
+        doc.page.margins.left, doc.page.height - 50, {
+        width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
+        align: 'center'
+      });
+  }
+}
+
+// ROUTES
+
+// Single URL scraping endpoint
+router.post('/scrape', async (req, res) => {
+  const { url } = req.body;
+  const { format } = req.query;
+
+  if (!url) {
+    return res.status(400).json({
+      success: false,
+      error: 'URL is required',
+      example: { url: 'https://example.com' }
+    });
+  }
+
+  // Validate URL format
+  try {
+    new URL(url);
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid URL format',
+      provided: url
+    });
   }
 
   try {
-    const scraper = new AdvancedScraper(maxDepth, maxLinksPerPage);
-    let results = [];
-    let targetUrl = url;
+    const scraper = new WebScraper();
+    const result = await scraper.scrapeUrl(url);
 
-    if (!url && query) {
-      const tavilyKey = "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";
-      const tavilyResp = await axios.post(
-        'https://api.tavily.com/search',
-        { query, max_results: 5 },
-        { headers: { Authorization: `Bearer ${tavilyKey}` } }
-      );
+    if (!result.success) {
+      return res.status(422).json({
+        success: false,
+        error: 'Scraping failed',
+        details: result.error,
+        url: result.url,
+        attempts: result.scrapingAttempts
+      });
+    }
 
-      const searchResults = tavilyResp.data?.results || [];
-      if (searchResults.length === 0) {
-        return res.status(404).json({ error: 'No results found' });
-      }
+    // PDF format requested
+    if (format === 'pdf') {
+      try {
+        const doc = new PDFDocument({
+          margins: { top: 50, bottom: 60, left: 72, right: 72 } // Increased bottom margin for footer
+        });
 
-      for (const result of searchResults.slice(0, 2)) {
-        const urlResults = await scraper.scrapeWithNestedLinks(result.url, query);
-        results = results.concat(urlResults);
+        const filename = (result.title || 'scraped-content')
+          .replace(/[^a-z0-9\s]/gi, '')
+          .replace(/\s+/g, '_')
+          .toLowerCase()
+          .substring(0, 50);
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}.pdf"`);
+
+        doc.pipe(res);
+        generatePDF(doc, result.title, result.content, result.metadata);
+        doc.end();
+
+      } catch (pdfError) {
+        console.error('PDF generation error:', pdfError);
+        // Simply end the response. Don't try to send JSON.
+        res.end();
       }
     } else {
-      results = await scraper.scrapeWithNestedLinks(targetUrl, query);
+      // JSON format (default)
+      delete result.contentHtml; // Remove HTML to keep response clean
+      return res.json({
+        success: true,
+        data: result,
+        stats: {
+          contentLength: result.content.length,
+          wordCount: result.wordCount,
+          extractedAt: result.timestamp
+        }
+      });
     }
-
-    if (results.length === 0) {
-      return res.status(500).json({ error: 'Failed to extract content from any pages' });
-    }
-
-    // Organize results by depth
-    const depthWiseResults = {};
-    results.forEach(result => {
-      if (!depthWiseResults[result.depth]) {
-        depthWiseResults[result.depth] = [];
-      }
-      depthWiseResults[result.depth].push(result);
-    });
-
-    // Prepare response based on summarize flag
-    let aiResponse = null;
-    if (summarize) {
-      const combinedContent = results.map(r => `[URL: ${r.url}]\n[Title: ${r.title}]\n${r.content}`).join('\n\n---\n\n');
-
-      const prompt = query
-        ? `Based on the following web content from multiple pages, please provide a comprehensive answer to: "${query}"\n\nContent:\n${combinedContent.slice(0, 40000)}`
-        : `Summarize and extract the most important information from the following web content collected from multiple pages:\n\n${combinedContent.slice(0, 40000)}`;
-
-      const aiResult = await model.generateContent(prompt);
-      aiResponse = aiResult.response.text();
-    }
-
-    return res.json({
-      query: query || 'Direct URL scraping',
-      timestamp: new Date().toISOString(),
-      totalPages: results.length,
-      maxDepth: maxDepth,
-      depthWiseResults: depthWiseResults,
-      summary: aiResponse || 'No summary requested - set summarize=true to get AI summary',
-      rawResults: results.map(r => ({
-        url: r.url,
-        title: r.title,
-        depth: r.depth,
-        contentLength: r.contentLength,
-        timestamp: r.timestamp,
-        contentPreview: r.content.substring(0, 300) + '...'
-      }))
-    });
 
   } catch (error) {
-    console.error('Advanced scraping error:', error);
+    console.error('Scraping error:', error);
     return res.status(500).json({
-      error: 'Scraping failed: ' + error.message
+      success: false,
+      error: 'Internal scraping error',
+      message: error.message
     });
   }
 });
 
-// New endpoint for getting full content of a specific page
-router.get('/content/:index', async (req, res) => {
-  const { index } = req.params;
-  const { results } = req.body;
+// ===================================================================
+// END OF CORRECTED CODE
+// ===================================================================
 
-  if (!results || !results[index]) {
-    return res.status(404).json({ error: 'Content not found' });
+
+// Batch scraping endpoint
+router.post('/scrape/batch', async (req, res) => {
+  const { urls, concurrent = 2 } = req.body;
+
+  if (!urls || !Array.isArray(urls) || urls.length === 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'URLs array is required',
+      example: { urls: ['https://example1.com', 'https://example2.com'] }
+    });
   }
 
-  const selectedResult = results[index];
-  return res.json({
-    url: selectedResult.url,
-    title: selectedResult.title,
-    depth: selectedResult.depth,
-    fullContent: selectedResult.content,
-    contentLength: selectedResult.contentLength
+  if (urls.length > 20) {
+    return res.status(400).json({
+      success: false,
+      error: 'Maximum 20 URLs allowed per batch',
+      provided: urls.length
+    });
+  }
+
+  if (concurrent > 5 || concurrent < 1) {
+    return res.status(400).json({
+      success: false,
+      error: 'Concurrent value must be between 1 and 5',
+      provided: concurrent
+    });
+  }
+
+  // Validate all URLs
+  const invalidUrls = [];
+  urls.forEach((url, index) => {
+    try {
+      new URL(url);
+    } catch (error) {
+      invalidUrls.push({ index, url, error: 'Invalid URL format' });
+    }
   });
+
+  if (invalidUrls.length > 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid URLs found',
+      invalidUrls: invalidUrls
+    });
+  }
+
+  try {
+    const scraper = new WebScraper();
+    const results = await scraper.scrapeMultipleUrls(urls, concurrent);
+
+    const stats = results.reduce((acc, result) => {
+      if (result.success) {
+        acc.successful++;
+        acc.totalWords += result.wordCount || 0;
+        acc.totalContent += result.content ? result.content.length : 0;
+      } else {
+        acc.failed++;
+      }
+      return acc;
+    }, { successful: 0, failed: 0, totalWords: 0, totalContent: 0 });
+
+    return res.json({
+      success: true,
+      summary: {
+        total: results.length,
+        successful: stats.successful,
+        failed: stats.failed,
+        totalWords: stats.totalWords,
+        totalContentLength: stats.totalContent
+      },
+      results: results,
+      processedAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Batch scraping error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Batch scraping failed',
+      message: error.message
+    });
+  }
+});
+
+// Preview endpoint
+router.post('/preview', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({
+      success: false,
+      error: 'URL is required'
+    });
+  }
+
+  try {
+    new URL(url);
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid URL format'
+    });
+  }
+
+  try {
+    const scraper = new WebScraper();
+    const result = await scraper.scrapeUrl(url);
+
+    if (!result.success) {
+      return res.status(422).json({
+        success: false,
+        error: 'Preview failed',
+        details: result.error
+      });
+    }
+
+    return res.json({
+      success: true,
+      url: result.url,
+      title: result.title,
+      preview: result.content.substring(0, 800) + (result.content.length > 800 ? '...' : ''),
+      metadata: result.metadata,
+      stats: {
+        fullContentLength: result.content.length,
+        wordCount: result.wordCount,
+        hasHtmlContent: !!result.contentHtml
+      },
+      extractedAt: result.timestamp
+    });
+
+  } catch (error) {
+    console.error('Preview error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Preview failed',
+      message: error.message
+    });
+  }
 });
 
 // Health check endpoint
 router.get('/health', (req, res) => {
-  res.json({ status: 'Advanced scraper with depth-wise results is running' });
+  res.json({
+    status: '✅ Web Scraper API is running',
+    version: '2.0.0',
+    features: [
+      'Single URL scraping (JSON/PDF)',
+      'Batch URL scraping (up to 20 URLs)',
+      'Content preview',
+      'Comprehensive metadata extraction',
+      'Enhanced error handling & retries',
+      'Rate limiting with configurable concurrency',
+      'User agent rotation',
+      'PDF generation with proper formatting',
+      'Word count and content statistics'
+    ],
+    endpoints: {
+      scrape: 'POST /scrape - Scrape single URL',
+      batch: 'POST /scrape/batch - Scrape multiple URLs',
+      preview: 'POST /preview - Get content preview',
+      health: 'GET /health - Health check'
+    },
+    limits: {
+      batchSize: 20,
+      maxConcurrent: 5,
+      contentLimit: '50KB',
+      timeout: '30s'
+    },
+    timestamp: new Date().toISOString()
+  });
 });
 
 export default router;
