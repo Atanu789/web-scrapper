@@ -3,7 +3,7 @@ import { useState } from 'react';
 
 // --- Configuration ---
 // Adjust this URL to where your backend server is running.
-const API_BASE_URL = 'http://localhost:4001/api/scrape'; 
+const API_BASE_URL = 'https://web-scrapper-1-ppds.onrender.com/api/scrape'; 
 
 function App() {
   const [input, setInput] = useState('');
